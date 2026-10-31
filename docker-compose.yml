@@ -1,0 +1,33 @@
+# PowerContext 服务端 —— 宝塔面板 Docker「编排」直接可用
+#
+#   docker compose pull && docker compose up -d    # 更新到 latest
+#   docker compose logs -f powercontext            # 看日志
+#
+# 所有配置项写在同目录的 .env 里（从 .env.example 复制而来）。
+name: powercontext
+
+services:
+  powercontext:
+    # 镜像由本仓库 GitHub Actions 自动构建，latest 始终跟随上游最新版本
+    image: ghcr.io/otaku-say/powercontext-image:latest
+    container_name: powercontext-server
+    restart: unless-stopped
+
+    # 只发布到本机环回地址：外网一律走宝塔 nginx 反向代理 + HTTPS
+    # 端口冲突时改 .env 里的 PC_HOST_PORT
+    ports:
+      - "127.0.0.1:${PC_HOST_PORT:-8000}:8000"
+
+    # SQLite 数据库与调度状态持久化在固定名字的卷里，便于备份/迁移
+    volumes:
+      - powercontext-data:/data
+
+    # 全部运行参数（鉴权、模型、调度）都来自 .env
+    env_file:
+      - .env
+
+    # 镜像自带 HEALTHCHECK（探测 /health/ready），这里不重复定义
+
+volumes:
+  powercontext-data:
+    name: powercontext-data

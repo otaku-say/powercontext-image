@@ -1,0 +1,113 @@
+name: build-image
+
+# 上游 powercontext 发版会同步到 PyPI，所以这里用「定时轮询 PyPI 最新版本」
+# 代替 watch 上游仓库：版本没变就不构建，版本一变就打 latest + 版本号两个 tag。
+on:
+  schedule:
+    - cron: "0 */6 * * *" # 每 6 小时检查一次（UTC）
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "指定 powercontext 版本号；留空 = 使用 PyPI 最新稳定版"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - .github/workflows/build-image.yml
+
+permissions:
+  contents: read
+  packages: write # 推镜像到 ghcr.io
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  resolve:
+    name: 解析目标版本
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      build: ${{ steps.decide.outputs.build }}
+    steps:
+      - name: 取版本号
+        id: pick
+        run: |
+          set -euo pipefail
+          version="${{ inputs.version }}"
+          if [ -z "$version" ]; then
+            version="$(curl -fsS https://pypi.org/pypi/powercontext/json | jq -r '.info.version')"
+          fi
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "无法从 PyPI 解析 powercontext 版本号" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "目标版本：$version"
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 判断是否需要构建
+        id: decide
+        env:
+          VERSION: ${{ steps.pick.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            echo "Dockerfile 或工作流变更，强制构建"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if docker manifest inspect "${IMAGE}:${VERSION}" > /dev/null 2>&1; then
+            echo "GHCR 已存在 ${VERSION}，跳过构建"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: 构建并推送镜像
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 设置 QEMU（arm64 交叉构建）
+        uses: docker/setup-qemu-action@v3
+
+      - name: 设置 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            POWERCONTEXT_VERSION=${{ needs.resolve.outputs.version }}
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ needs.resolve.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
