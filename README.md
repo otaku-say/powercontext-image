@@ -41,14 +41,15 @@ chmod 600 .env
 ### 2. 首次拉镜像
 
 ```bash
+# 已验证：公开包，无需登录，可直接匿名拉取
+# linux/amd64 + linux/arm64 双架构，latest 与 1.4.1 指向同一 digest
 docker pull ghcr.io/otaku-say/powercontext-image:latest
 ```
 
-GHCR 包默认是**私有**的，第一次拉取会 401。到 GitHub → 你的头像 → Your packages → `powercontext-image` → Package settings → Change visibility 设为 **Public**；或者保持私有，在服务器上登录一次：
+镜像包已设为 **Public**。如果拉取报 401（例如以后误改成私有），二选一：
 
-```bash
-docker login ghcr.io -u otaku-say -p <带 read:packages 权限的 PAT>
-```
+- GitHub → 头像 → Your packages → `powercontext-image` → Package settings → Change visibility 设为 **Public**
+- 或保持私有，在服务器上登录一次：`docker login ghcr.io -u otaku-say -p <带 read:packages 权限的 PAT>`
 
 ### 3. 在面板启动
 
@@ -244,7 +245,7 @@ docker compose start
 | 检索只有 `fts` 没有 `vector`/`hybrid` | embedding 未配置或维度/Profile 不匹配；检查 `EMBEDDING_*` 三项 |
 | 启动报向量 Profile 不兼容 | 改过 `EMBEDDING_PROFILE_ID`/维度。清空数据卷重建库，或改回原配置 |
 | 插件不召回 | `scopeId` 没填、请求头 token 不对、或 `serverUrl` 用了非 loopback 的 http |
-| 镜像拉取 401 | GHCR 包是私有：设为 Public，或 `docker login ghcr.io -u <user> -p <PAT>` |
+| 镜像拉取 401 | GHCR 包被设为私有（本仓库当前是 public）：设为 Public，或 `docker login ghcr.io -u <user> -p <PAT>` |
 | 对话没被自动提炼 | `capture` 没开，或 `RUNTIME_SCHEDULE_SECONDS` 未设置 |
 
 ## 目录结构
