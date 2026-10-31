@@ -1,5 +1,7 @@
 # powercontext-image
 
+[![build-image](https://github.com/otaku-say/powercontext-image/actions/workflows/build-image.yml/badge.svg)](https://github.com/otaku-say/powercontext-image/actions/workflows/build-image.yml)
+
 给 [PowerContext](https://powercontext.oceanbase.io/en/docs/operate/deploy-server/) 服务端做自动化镜像仓库：上游发版后自动构建多架构镜像并推送到 GHCR，宝塔面板直接 `image: ghcr.io/otaku-say/powercontext-image:latest` 拉取即可。
 
 - 镜像地址：`ghcr.io/otaku-say/powercontext-image:latest`
@@ -21,6 +23,8 @@
 | 推送到 `main`（改了 `Dockerfile` 或工作流） | 强制重建 |
 
 所以上游一发新版，最长 6 小时后 `latest` 就会指向新版本；你也可以在 Actions 页面点 `Run workflow` 立即触发。
+
+构建状态与历史：<https://github.com/otaku-say/powercontext-image/actions>
 
 ## 在宝塔面板部署
 
