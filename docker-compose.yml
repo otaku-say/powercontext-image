@@ -35,6 +35,12 @@ services:
       POWERCONTEXT_HOME: "/data"
       POWERCONTEXT_SERVER_HTTP_HOST: "0.0.0.0"
       POWERCONTEXT_SERVER_HTTP_PORT: "8000"
+      # 反代必须让应用看到"外部是 https、外部主机名是什么"，否则 Dashboard
+      # 登录的同源校验（Origin 的 scheme+host 与请求本身比对）会回 403。
+      # uvicorn 默认只信任 127.0.0.1/::1 发来的 X-Forwarded-*，而经 docker
+      # 发布端口进来的请求源是网桥地址，所以这里放开。端口只绑宿主机 127.0.0.1，
+      # 只有本机能连到，放开是安全的。
+      FORWARDED_ALLOW_IPS: "*"
 
       # ----------------------------- 访问控制 ------------------------------
       # disabled = 不鉴权（仅限纯本机试用）；对外必须 enforced

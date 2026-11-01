@@ -158,3 +158,49 @@ curl -fsS "$PC/v1/embeddings" -H "Authorization: Bearer $TOKEN" -H 'content-type
 ```
 
 然后正常对话一轮：Magpie 的 Plugins 页应显示 `ready`（带字节数），Dashboard → Sources 出现该对话，过一个提炼周期后长出 Memory。
+
+### 6. Dashboard 登录 403（反代 / Cloudflare）
+
+Dashboard 的登录表单做了同源校验：`Origin` 的 scheme+host 必须与请求本身一致
+（`powercontext/server/dashboard/session.py: same_origin`）。反代没有透出外部 scheme
+时，应用看到的是 `http://...`，与浏览器的 `https://...` 不一致 → **403**。
+
+两处都要对：
+
+**a) 容器里放开代理头信任**（compose 已内置）
+
+```yaml
+FORWARDED_ALLOW_IPS: "*"
+```
+
+uvicorn 默认只信任 `127.0.0.1,::1` 的 `X-Forwarded-*`，而经 docker 发布端口进来的源地址
+是网桥网关，会被忽略，于是 scheme 永远停在 http。
+
+**b) nginx 透出外部 scheme 与 host**
+
+宝塔 → 网站 → 反代站点 → 配置文件，在反代 location 里确认：
+
+```nginx
+proxy_set_header Host $host;
+proxy_set_header X-Forwarded-Proto https;      # 若同时需要 http 访问，用下方 map 版本
+proxy_set_header X-Forwarded-Host $host;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+client_max_body_size 50m;
+proxy_read_timeout 300s;
+```
+
+已有 Cloudflare 在前面时，`$http_x_forwarded_proto` 就是 `https`，也可以直接用
+`proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;`。
+
+**先判断 403 是谁返回的**
+
+```bash
+curl -sI https://pc.example.com/dashboard/home | head -20
+```
+
+| 响应特征 | 来源 | 处理 |
+| --- | --- | --- |
+| 有 `X-Dashboard-HTML: 1` | PowerContext | 上面 a+b 两处 |
+| `server: nginx` 且 `403 Forbidden` 页面 | nginx | 站点配置里的 deny/目录规则、反代目标写错 |
+| `server: cloudflare` + `cf-ray` | Cloudflare | WAF / Bot Fight / Under Attack；临时把 Security Level 调低或加跳过规则 |
