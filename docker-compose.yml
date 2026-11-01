@@ -1,33 +1,137 @@
-# PowerContext 服务端 —— 宝塔面板 Docker「编排」直接可用
+# PowerContext 服务端 —— 宝塔面板 Docker「编排」直接可用（单文件，不依赖 .env）
 #
-#   docker compose pull && docker compose up -d    # 更新到 latest
-#   docker compose logs -f powercontext            # 看日志
+#   docker compose pull && docker compose up -d
+#   docker compose logs -f powercontext
 #
-# 所有配置项写在同目录的 .env 里（从 .env.example 复制而来）。
+# 所有运行参数都内联在下面的 environment 里，容器只认 composer 传进来的环境变量。
+# ⚠ 本文件含密钥（AUTH_TOKEN / OPENROUTER_KEY）：仓库是公开的，
+#   真值请只填在服务器的编排文件里，别把填好的版本 commit 回去。
 name: powercontext
+
+# 三个推理能力共用同一把 OpenRouter key：用 YAML 锚点只维护一处
+x-or-headers: &or_headers '{"Authorization":"Bearer REPLACE_WITH_OPENROUTER_KEY"}'
 
 services:
   powercontext:
-    # 镜像由本仓库 GitHub Actions 自动构建，latest 始终跟随上游最新版本
     image: ghcr.io/otaku-say/powercontext-image:latest
     container_name: powercontext-server
     restart: unless-stopped
 
-    # 只发布到本机环回地址：外网一律走宝塔 nginx 反向代理 + HTTPS
-    # 端口冲突时改 .env 里的 PC_HOST_PORT
-    ports:
-      - "127.0.0.1:${PC_HOST_PORT:-8000}:8000"
+    # 让 Python 以 PID 1 之外的身份运行：SIGTERM 能被正确处理，
+    # 调度器与 worker 走正常关闭流程，而不是被强杀
+    init: true
 
-    # SQLite 数据库与调度状态持久化在固定名字的卷里，便于备份/迁移
+    # 只发布到本机环回地址：外网一律走宝塔 nginx 反向代理 + HTTPS。
+    # 端口冲突时改冒号左边的宿主机端口。
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    # SQLite 数据库与调度状态持久化，便于备份/迁移
     volumes:
       - powercontext-data:/data
 
-    # 全部运行参数（鉴权、模型、调度）都来自 .env
-    env_file:
-      - .env
+    environment:
+      # ------------------------- 监听地址与数据目录 -------------------------
+      POWERCONTEXT_HOME: "/data"
+      POWERCONTEXT_SERVER_HTTP_HOST: "0.0.0.0"
+      POWERCONTEXT_SERVER_HTTP_PORT: "8000"
+
+      # ----------------------------- 访问控制 ------------------------------
+      # disabled = 不鉴权（仅限纯本机试用）；对外必须 enforced
+      POWERCONTEXT_SERVER_ACCESS_MODE: "enforced"
+      # 客户端请求头 Authorization: Bearer <此值>，也是 Dashboard 登录凭据
+      # openssl rand -hex 32
+      POWERCONTEXT_SERVER_AUTH_TOKEN: "把 openssl rand -hex 32 的输出填在这里"
+      POWERCONTEXT_SERVER_DASHBOARD_ENABLED: "true"
+      # 远程 Skill 分发才用得到，可留空
+      # POWERCONTEXT_SERVER_PUBLIC_URL: "https://pc.example.com"
+
+      # ------------------------ 向量模型（语义召回） ------------------------
+      # 前缀 openai: 对应 OpenAI 兼容的 /embeddings
+      POWERCONTEXT_SERVER_INFERENCE_EMBEDDING_MODEL: "openai:google/gemini-embedding-2"
+      POWERCONTEXT_SERVER_INFERENCE_EMBEDDING_BASE_URL: "https://openrouter.ai/api/v1"
+      POWERCONTEXT_SERVER_INFERENCE_EMBEDDING_HEADERS: *or_headers
+      # gemini-embedding-2 支持 128-3072；1024 与 bge-m3 同量级，索引更轻
+      POWERCONTEXT_SERVER_INFERENCE_EMBEDDING_DIMENSION: "1024"
+      # 向量空间标识：建库后不可更改，改了必须清空数据卷重建
+      POWERCONTEXT_SERVER_INFERENCE_EMBEDDING_PROFILE_ID: "or-gemini-embedding-2-1024-unit"
+      # OpenRouter 会把 dimensions 透传给 Google，保持 true
+      POWERCONTEXT_SERVER_INFERENCE_EMBEDDING_SEND_DIMENSIONS: "true"
+      POWERCONTEXT_SERVER_INFERENCE_EMBEDDING_BATCH_SIZE: "10"
+      POWERCONTEXT_SERVER_INFERENCE_EMBEDDING_TIMEOUT_SECONDS: "30"
+
+      # -------------------------- 生成 / 提炼模型 ---------------------------
+      # 必须是 openai-chat:（Chat Completions）；
+      # 写 openai: 会走 Responses API，OpenRouter 未实现，直接 404。
+      # 默认 Gemini 3.5 Flash Lite：多把 Google key 时 RPD 叠加、TPM 250K/账号，
+      # 质量与结构化输出服从性都优于 Gemma，单次约 1-2 秒。
+      # 备用（Google 额度耗尽时）：openai-chat:google/gemma-4-26b-a4b-it
+      #   —— 走 Cloudflare 供给，RPD 14.4K/账号，但 TPM 仅 16K、单次约 3-4 秒。
+      # 换提炼模型不影响向量索引，随时可切回。
+      POWERCONTEXT_SERVER_INFERENCE_GENERATION_MODEL: "openai-chat:google/gemini-3.5-flash-lite"
+      POWERCONTEXT_SERVER_INFERENCE_GENERATION_BASE_URL: "https://openrouter.ai/api/v1"
+      POWERCONTEXT_SERVER_INFERENCE_GENERATION_HEADERS: *or_headers
+      POWERCONTEXT_SERVER_INFERENCE_GENERATION_MODEL_SETTINGS: '{"max_tokens":2048}'
+      # 输出校验失败会带反馈重试；配额紧张时降为 1
+      POWERCONTEXT_SERVER_INFERENCE_GENERATION_MAX_REQUESTS: "2"
+      POWERCONTEXT_SERVER_INFERENCE_GENERATION_TIMEOUT_SECONDS: "90"
+      # Gemini 3.5 Flash Lite 实际 1M 上下文；给 PC 的预算取 500K，
+      # 留出下限保护，避免单轮把整段长历史都塞进去烧配额。
+      # 切回 Gemma（256K）或免费档（TPM 16K）时记得同步调小。
+      POWERCONTEXT_SERVER_INFERENCE_GENERATION_MODEL_CONTEXT_WINDOW_TOKENS: "500000"
+
+      # ---------------------- 决策模型（默认关闭，可影子观察） ---------------
+      # clef 系列走 OpenRouter 的 decisions 契约（/api/alpha/decisions），不是 chat，
+      # PowerContext 的决策端口接不了，这里用 chat 模型。
+      POWERCONTEXT_SERVER_INFERENCE_DECISION_MODEL: "openai-chat:google/gemini-3.5-flash-lite"
+      POWERCONTEXT_SERVER_INFERENCE_DECISION_BASE_URL: "https://openrouter.ai/api/v1"
+      POWERCONTEXT_SERVER_INFERENCE_DECISION_HEADERS: *or_headers
+      POWERCONTEXT_SERVER_INFERENCE_DECISION_MAX_REQUESTS: "1"
+      POWERCONTEXT_SERVER_INFERENCE_DECISION_TIMEOUT_SECONDS: "30"
+      POWERCONTEXT_SERVER_RUNTIME_DECISION_ASSISTANCE_ENABLED: "false"
+      POWERCONTEXT_SERVER_RUNTIME_MEMORY_WRITE_GATE_ENABLED: "false"
+      # 打开决策后若要外部调用，改成 hosted_redacted 并启用 sanitizer
+      POWERCONTEXT_SERVER_RUNTIME_MEMORY_WRITE_GATE_PRIVACY_BOUNDARY: "no_external_call"
+
+      # ---------------------------- 后台自动提炼 ----------------------------
+      # 每隔多少秒消化一次新捕获的对话（不设置 = 只存不提炼）
+      POWERCONTEXT_SERVER_RUNTIME_SCHEDULE_SECONDS: "120"
+      # 每次激活最多处理多少 Source。单次提炼约 4-5K token；
+      # Flash Lite 的 TPM 是 250K/账号，窗口可以放大到 40，
+      # 若切回 Gemma（TPM 16K）需降回 20 以下。
+      POWERCONTEXT_SERVER_RUNTIME_SOURCE_WINDOW_LIMIT: "40"
+      POWERCONTEXT_SERVER_RUNTIME_TOPIC_MEMORY_SCHEDULE_SECONDS: "600"
+      POWERCONTEXT_SERVER_RUNTIME_TOPIC_MEMORY_SOURCE_WINDOW_LIMIT: "5"
+      POWERCONTEXT_SERVER_RUNTIME_TOPIC_MEMORY_MAX_WORKERS: "4"
+      # coding = 面向工程协作；conversation = 面向对话事实
+      POWERCONTEXT_SERVER_RUNTIME_MEMORY_EXTRACTION_PROFILE: "coding"
+      # 召回等待 query 向量的预算：云端 embedding 一次约 0.7-1.1 秒，
+      # 默认 0.5 秒会让召回经常退化成纯词面检索。必须小于 Magpie 插件的 requestTimeoutMs。
+      POWERCONTEXT_SERVER_RUNTIME_RECALL_EMBEDDING_TIMEOUT_SECONDS: "2"
+
+      # ---------------------------- 日志与观测 -----------------------------
+      POWERCONTEXT_SERVER_METRICS_ENABLED: "false"
+      # POWERCONTEXT_SERVER_LOGGING_LEVEL: "INFO"
 
     # 镜像自带 HEALTHCHECK（探测 /health/ready），这里不重复定义
+
+    # 容器内 IPv6 不通时，到 OpenRouter 的连接可能先挂 IPv6 再回落，
+    # 表现为每次调用固定多等约 20 秒。确认有问题再取消注释。
+    # sysctls:
+    #   net.ipv6.conf.all.disable_ipv6: "1"
+
+    # 【可选】Magpie 与本容器同宿主、不同 compose 项目时：加入 Magpie 的网络，
+    # 插件里就能填 http://powercontext-server:8000，不必暴露到宿主机。
+    # 先 `docker network ls` 确认 Magpie 的网络名（通常 <项目名>_default）。
+    # networks:
+    #   - default
+    #   - magpie
 
 volumes:
   powercontext-data:
     name: powercontext-data
+
+# networks:
+#   magpie:
+#     external: true
+#     name: magpie_default
